@@ -37,3 +37,18 @@ export const bookmarkCrawlLatencyHistogram = new Histogram({
 registry.registerMetric(workerStatsCounter);
 registry.registerMetric(crawlerStatusCodeCounter);
 registry.registerMetric(bookmarkCrawlLatencyHistogram);
+
+export const inferenceRequestCounter = new Counter({
+  name: "karakeep_inference_requests_total",
+  help: "Text and image provider requests made by the inference worker",
+  labelNames: ["kind", "model", "outcome"],
+  registers: [registry],
+});
+
+export const inferenceRequestDurationHistogram = new Histogram({
+  name: "karakeep_inference_request_duration_seconds",
+  help: "Inference worker provider request duration, including failed requests",
+  labelNames: ["kind", "model", "outcome"],
+  buckets: [0.1, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120],
+  registers: [registry],
+});

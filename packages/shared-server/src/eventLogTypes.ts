@@ -24,8 +24,12 @@ type EventLogInternal =
       "inference.type": "tag" | "summarize";
       "inference.model"?: string;
       "inference.total_tokens"?: number;
-      "bookmark.url"?: string;
-      "bookmark.domain"?: string;
+      "inference.request.kind"?: "text" | "image";
+      "inference.request.duration"?: number;
+      "inference.request.outcome"?: string;
+      "inference.request.http_status"?: number;
+      "inference.error.code"?: string;
+      "inference.error.http_status"?: number;
       "bookmark.content_type"?: string;
       "crawler.status_code"?: number | null;
       "inference.prompt.custom_count"?: number;

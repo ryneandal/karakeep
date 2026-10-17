@@ -8,6 +8,7 @@ import { bookmarks } from "@karakeep/db/schema";
 import {
   addLogFields,
   OpenAIQueue,
+  setSpanAttributes,
   zOpenAIRequestSchema,
 } from "@karakeep/shared-server";
 import serverConfig from "@karakeep/shared/config";
@@ -17,6 +18,27 @@ import { DequeuedJob, getQueueClient } from "@karakeep/shared/queueing";
 
 import { runSummarization } from "./summarize";
 import { runTagging } from "./tagging";
+import { InvalidTaggingResponseError } from "./taggingOutput";
+import { InferenceJobError } from "./inferenceErrors";
+import { withInferenceTelemetry } from "./inferenceTelemetry";
+
+function sanitizeJobError(
+  error: unknown,
+  signal?: AbortSignal,
+): InferenceJobError {
+  const code = signal?.aborted
+    ? "aborted"
+    : error instanceof InferenceJobError
+      ? error.code
+      : error instanceof InvalidTaggingResponseError
+        ? "invalid-response"
+        : "job-error";
+  // Recreate even known errors so an attached cause or modified stack never escapes.
+  return new InferenceJobError(
+    code,
+    error instanceof InferenceJobError ? error.status : undefined,
+  );
+}
 
 async function attemptMarkStatus(
   jobData: object | undefined,
@@ -36,8 +58,8 @@ async function attemptMarkStatus(
         ...(request.type === "tag" ? { taggingStatus: status } : {}),
       })
       .where(eq(bookmarks.id, request.bookmarkId));
-  } catch (e) {
-    logger.error(`Something went wrong when marking the tagging status: ${e}`);
+  } catch {
+    logger.error("Failed to update inference job status");
   }
 }
 
@@ -60,9 +82,8 @@ export class OpenAiWorker {
         onError: async (job) => {
           workerStatsCounter.labels("inference", "failed").inc();
           const jobId = job.id;
-          logger.error(
-            `[inference][${jobId}] inference job failed: ${job.error}\n${job.error.stack}`,
-          );
+          const safeError = sanitizeJobError(job.error);
+          logger.error(`[inference][${jobId}] ${safeError.message}`);
           if (job.numRetriesLeft == 0) {
             workerStatsCounter.labels("inference", "failed_permanent").inc();
             await attemptMarkStatus(job?.data, "failure");
@@ -81,6 +102,28 @@ export class OpenAiWorker {
 }
 
 async function runOpenAI(job: DequeuedJob<ZOpenAIRequest>) {
+  // This boundary must be inside the event and tracing wrappers: both serialize errors.
+  try {
+    await runInferenceJob(job);
+  } catch (error) {
+    const safeError = sanitizeJobError(error, job.abortSignal);
+    addLogFields<"inferenceWorker.run">({
+      "inference.error.code": safeError.code,
+      ...(safeError.status === undefined
+        ? {}
+        : { "inference.error.http_status": safeError.status }),
+    });
+    setSpanAttributes({
+      "inference.error.code": safeError.code,
+      ...(safeError.status === undefined
+        ? {}
+        : { "inference.error.http_status": safeError.status }),
+    });
+    throw safeError;
+  }
+}
+
+async function runInferenceJob(job: DequeuedJob<ZOpenAIRequest>) {
   const jobId = job.id;
 
   const inferenceClient = InferenceClientFactory.build();
@@ -93,9 +136,7 @@ async function runOpenAI(job: DequeuedJob<ZOpenAIRequest>) {
 
   const request = zOpenAIRequestSchema.safeParse(job.data);
   if (!request.success) {
-    throw new Error(
-      `[inference][${jobId}] Got malformed job request: ${request.error.toString()}`,
-    );
+    throw new InferenceJobError("invalid-job");
   }
 
   const { bookmarkId } = request.data;
@@ -113,10 +154,18 @@ async function runOpenAI(job: DequeuedJob<ZOpenAIRequest>) {
   });
   switch (request.data.type) {
     case "summarize":
-      await runSummarization(bookmarkId, job, inferenceClient);
+      await runSummarization(
+        bookmarkId,
+        job,
+        withInferenceTelemetry(inferenceClient),
+      );
       break;
     case "tag":
-      await runTagging(bookmarkId, job, inferenceClient);
+      await runTagging(
+        bookmarkId,
+        job,
+        withInferenceTelemetry(inferenceClient),
+      );
       break;
     default:
       throw new Error(`Unknown inference type: ${request.data.type}`);
