@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import path from "path";
 import { z } from "zod";
 
+import { zCreateTagRequestSchema } from "./types/tags";
+
 const stringBool = (defaultValue: string) =>
   z
     .string()
@@ -112,6 +114,22 @@ const allEnv = z.object({
     .default("structured"),
   INFERENCE_ENABLE_AUTO_TAGGING: stringBool("true"),
   INFERENCE_ENABLE_AUTO_SUMMARIZATION: stringBool("false"),
+  INFERENCE_TAGGING_EXCLUDED_TAGS: z
+    .string()
+    .prefault("[]")
+    .transform((value, ctx) => {
+      try {
+        return JSON.parse(value);
+      } catch {
+        ctx.addIssue({
+          code: "custom",
+          message:
+            "INFERENCE_TAGGING_EXCLUDED_TAGS must be a JSON array of tag names",
+        });
+        return z.NEVER;
+      }
+    })
+    .pipe(z.array(zCreateTagRequestSchema.shape.name)),
   OCR_CACHE_DIR: z.string().optional(),
   OCR_LANGS: z
     .string()
@@ -370,6 +388,7 @@ const serverConfigSchema = allEnv.transform((val, ctx) => {
           : val.INFERENCE_OUTPUT_SCHEMA,
       enableAutoTagging: val.INFERENCE_ENABLE_AUTO_TAGGING,
       enableAutoSummarization: val.INFERENCE_ENABLE_AUTO_SUMMARIZATION,
+      excludedTags: val.INFERENCE_TAGGING_EXCLUDED_TAGS,
     },
     chat: {
       enabled: val.CHAT_ENABLED,

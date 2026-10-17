@@ -86,6 +86,27 @@ For more information on `OAUTH_ALLOW_DANGEROUS_EMAIL_ACCOUNT_LINKING`, check the
 
 Either `OPENAI_API_KEY` or `OLLAMA_BASE_URL` need to be set for automatic tagging to be enabled. Otherwise, automatic tagging will be skipped.
 
+`INFERENCE_TAGGING_EXCLUDED_TAGS` is a JSON array of names that automatic tagging
+must never attach, such as `["automation-ready", "automation-consumed"]`. It
+defaults to `[]`. Matching follows the existing tag key: names are trimmed,
+leading `#` characters are removed, and case, ASCII spaces, hyphens and
+underscores are ignored. Commas inside a tag name are supported. Exclusions do
+not affect manual tagging or remove existing associations. If every inferred
+tag is excluded, the bookmark's current tags are left intact.
+
+The tagging worker records generated and rejected tag counts without logging
+tag names or model-response excerpts. Provider failures retain HTTP status or
+cancellation metadata without provider messages, bodies, headers or abort
+reasons. This applies to the tagging worker; other features and telemetry
+exporters have their own logging behavior.
+
+Text tagging and summary prompts are checked after assembly against
+`INFERENCE_CONTEXT_LENGTH`, using the existing `o200k_base` tokenizer. Captured
+content is truncated only in the request; stored bookmarks are unchanged. If
+the instructions alone exceed this budget, the job fails before requesting
+inference. This counts prompt text, not image tokens, protocol overhead or a
+provider's different tokenizer.
+
 :::warning
 
 - The quality of the tags you'll get will depend on the quality of the model you choose.
