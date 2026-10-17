@@ -1,7 +1,6 @@
 import { and, eq, inArray } from "drizzle-orm";
 import { getBookmarkDomain } from "network";
 import { buildImpersonatingTRPCClient } from "trpc";
-import { z } from "zod";
 import { getVectorStoreClient } from "@karakeep/shared/vectorStore";
 
 import type { ZOpenAIRequest } from "@karakeep/shared-server";
@@ -34,61 +33,19 @@ import { RuleEngine } from "@karakeep/trpc/lib/ruleEngine";
 import { Bookmark } from "@karakeep/trpc/models/bookmarks";
 import { WebhooksService } from "@karakeep/trpc/models/webhooks.service";
 
+import {
+  filterInferredTags,
+  inferredTagsSchema as openAIResponseSchema,
+  parseTaggingResponse,
+  runTaggingInference,
+  tagNormalizer,
+} from "./taggingOutput";
+
 /**
  * The maximum length of the relevant tag names to avoid bloating the inference context.
  */
 const RELEVANT_TAG_TRUNCATE_LENGTH = 1000;
 
-const openAIResponseSchema = z.object({
-  tags: z.array(z.string()),
-});
-
-function parseJsonFromLLMResponse(response: string): unknown {
-  const trimmedResponse = response.trim();
-
-  // Try parsing the response as-is first
-  try {
-    return JSON.parse(trimmedResponse);
-  } catch {
-    // If that fails, try to extract JSON from markdown code blocks
-    const jsonBlockRegex = /```(?:json)?\s*(\{[\s\S]*?\})\s*```/i;
-    const match = trimmedResponse.match(jsonBlockRegex);
-
-    if (match) {
-      try {
-        return JSON.parse(match[1]);
-      } catch {
-        // Fall through to other extraction methods
-      }
-    }
-
-    // Try to find JSON object boundaries in the text
-    const jsonObjectRegex = /\{[\s\S]*\}/;
-    const objectMatch = trimmedResponse.match(jsonObjectRegex);
-
-    if (objectMatch) {
-      try {
-        return JSON.parse(objectMatch[0]);
-      } catch {
-        // Fall through to final attempt
-      }
-    }
-
-    // Last resort: try to parse the original response again to get the original error
-    return JSON.parse(trimmedResponse);
-  }
-}
-
-function tagNormalizer() {
-  // This function needs to be in sync with the generated normalizedName column in bookmarkTags
-  function normalizeTag(tag: string) {
-    return tag.toLowerCase().replace(/[ \-_]/g, "");
-  }
-
-  return {
-    normalizeTag,
-  };
-}
 async function buildPrompt(
   bookmark: NonNullable<Awaited<ReturnType<typeof fetchBookmark>>>,
   tagStyle: ZTagStyle,
@@ -171,17 +128,20 @@ async function inferTagsFromImage(
   addLogFields<"inferenceWorker.run">({
     "inference.model": serverConfig.inference.imageModel,
   });
-  return inferenceClient.inferFromImage(
-    buildImagePrompt(
-      inferredTagLang,
-      await fetchCustomPrompts(bookmark.userId, "images"),
-      tagStyle,
-      curatedTags,
-      potentialRelevantTags,
-    ),
-    metadata.contentType,
-    base64,
-    { schema: openAIResponseSchema, abortSignal },
+  const prompt = buildImagePrompt(
+    inferredTagLang,
+    await fetchCustomPrompts(bookmark.userId, "images"),
+    tagStyle,
+    curatedTags,
+    potentialRelevantTags,
+  );
+  return runTaggingInference(
+    () =>
+      inferenceClient.inferFromImage(prompt, metadata.contentType, base64, {
+        schema: openAIResponseSchema,
+        abortSignal,
+      }),
+    abortSignal,
   );
 }
 
@@ -269,10 +229,14 @@ async function inferTagsFromPDF(
     "inference.model": serverConfig.inference.textModel,
     "inference.prompt.size": Buffer.byteLength(prompt, "utf8"),
   });
-  return inferenceClient.inferFromText(prompt, {
-    schema: openAIResponseSchema,
+  return runTaggingInference(
+    () =>
+      inferenceClient.inferFromText(prompt, {
+        schema: openAIResponseSchema,
+        abortSignal,
+      }),
     abortSignal,
-  });
+  );
 }
 
 async function inferTagsFromText(
@@ -298,10 +262,14 @@ async function inferTagsFromText(
     "inference.model": serverConfig.inference.textModel,
     "inference.prompt.size": Buffer.byteLength(prompt, "utf8"),
   });
-  return await inferenceClient.inferFromText(prompt, {
-    schema: openAIResponseSchema,
+  return runTaggingInference(
+    () =>
+      inferenceClient.inferFromText(prompt, {
+        schema: openAIResponseSchema,
+        abortSignal,
+      }),
     abortSignal,
-  });
+  );
 }
 
 async function inferTags(
@@ -380,35 +348,15 @@ async function inferTags(
     return null;
   }
 
-  try {
-    let tags = openAIResponseSchema.parse(
-      parseJsonFromLLMResponse(response.response),
-    ).tags;
-    logger.info(
-      `[inference][${jobId}] Inferring tag for bookmark "${bookmark.id}" used ${response.totalTokens} tokens and inferred: ${tags}`,
-    );
-
-    // Sometimes the tags contain the hashtag symbol, let's strip them out if they do.
-    // Additionally, trim the tags to prevent whitespaces at the beginning/the end of the tag.
-    tags = tags.map((t) => {
-      let tag = t;
-      if (tag.startsWith("#")) {
-        tag = t.slice(1);
-      }
-      return tag.trim();
-    });
-    addLogFields<"inferenceWorker.run">({
-      "inference.tagging.num_generated_tags": tags.length,
-      "inference.total_tokens": response.totalTokens,
-    });
-
-    return tags;
-  } catch (e) {
-    const responseSneak = response.response.substring(0, 20);
-    throw new Error(
-      `[inference][${jobId}] The model ignored our prompt and didn't respond with the expected JSON: ${JSON.stringify(e)}. Here's a sneak peak from the response: ${responseSneak}`,
-    );
-  }
+  const tags = parseTaggingResponse(response.response);
+  logger.info(
+    `[inference][${jobId}] Inferring tags for bookmark "${bookmark.id}" used ${response.totalTokens} tokens and generated ${tags.length} tags.`,
+  );
+  addLogFields<"inferenceWorker.run">({
+    "inference.tagging.num_generated_tags": tags.length,
+    "inference.total_tokens": response.totalTokens,
+  });
+  return tags;
 }
 
 async function connectTags(
@@ -416,7 +364,14 @@ async function connectTags(
   inferredTags: string[],
   userId: string,
 ) {
-  if (inferredTags.length == 0) {
+  const filtered = filterInferredTags(
+    inferredTags,
+    serverConfig.inference.excludedTags,
+  );
+  addLogFields<"inferenceWorker.run">({
+    "inference.tagging.num_rejected_tags": filtered.rejectedCount,
+  });
+  if (filtered.tags.length == 0) {
     return;
   }
 
@@ -427,7 +382,7 @@ async function connectTags(
       // Attempt to match exiting tags with the new ones
       const { matchedTagIds, notFoundTagNames } = (() => {
         const { normalizeTag } = tagNormalizer();
-        const normalizedInferredTags = inferredTags.map((t) => ({
+        const normalizedInferredTags = filtered.tags.map((t) => ({
           originalTag: t,
           normalizedTag: normalizeTag(t),
         }));
@@ -620,7 +575,7 @@ async function getPotentiallyRelevantTags(
   }
 
   logger.debug(
-    `[inference][${jobId}] Will use ${toKeep.length} potential tags (out of ${tags.length}, across ${similarBookmarkIds.length} bookmarks) for the bookmark with id ${bookmarkId}: ${toKeep.join(", ")}`,
+    `[inference][${jobId}] Will use ${toKeep.length} potential tags (out of ${tags.length}, across ${similarBookmarkIds.length} bookmarks) for the bookmark with id ${bookmarkId}`,
   );
 
   return [...toKeep];
@@ -685,9 +640,9 @@ export async function runTagging(
           bookmark.userId,
           job.data.embedding,
         )) ?? undefined;
-    } catch (e) {
+    } catch {
       logger.error(
-        `[inference][${jobId}] Failed to find potentially relevant tags: ${e}`,
+        `[inference][${jobId}] Failed to find potentially relevant tags`,
       );
     }
   }

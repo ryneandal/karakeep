@@ -18,22 +18,40 @@ async function getEncodingInstance(): Promise<Tiktoken> {
   return encoding;
 }
 
-async function calculateNumTokens(text: string): Promise<number> {
-  const enc = await getEncodingInstance();
-  return enc.encode(text).length;
-}
-
-async function truncateContent(
+async function buildBoundedPrompt(
   content: string,
-  length: number,
+  contextLength: number,
+  render: (content: string) => string,
 ): Promise<string> {
-  const enc = await getEncodingInstance();
-  const tokens = enc.encode(content);
-  if (tokens.length <= length) {
-    return content;
+  if (!Number.isInteger(contextLength) || contextLength <= 0) {
+    throw new Error("INFERENCE_CONTEXT_LENGTH must be a positive integer");
   }
-  const truncatedTokens = tokens.slice(0, length);
-  return enc.decode(truncatedTokens);
+  const enc = await getEncodingInstance();
+  const template = render("");
+  const templateSize = enc.encode(template).length;
+  if (templateSize > contextLength) {
+    // Do not truncate trusted instructions or include custom prompt text in errors.
+    throw new Error(
+      "Inference prompt instructions exceed INFERENCE_CONTEXT_LENGTH",
+    );
+  }
+  const tokens = enc.encode(content);
+  let available = Math.min(tokens.length, contextLength - templateSize);
+  while (available > 0) {
+    const prompt = render(
+      available === tokens.length
+        ? content
+        : enc.decode(tokens.slice(0, available)),
+    );
+    const overflow = enc.encode(prompt).length - contextLength;
+    if (overflow <= 0) {
+      return prompt;
+    }
+    // Token boundaries can change when content is inserted into the template.
+    // Recheck the assembled prompt and strictly reduce the content each time.
+    available = Math.max(0, available - overflow);
+  }
+  return template;
 }
 
 /**
@@ -52,26 +70,18 @@ export async function buildTextPrompt(
   curatedTags?: string[],
   potentialRelevantTags?: string[],
 ): Promise<string> {
-  content = preprocessContent(content);
-  const promptTemplate = constructTextTaggingPrompt(
-    lang,
-    customPrompts,
-    "",
-    tagStyle,
-    curatedTags,
-    potentialRelevantTags,
-  );
-  const promptSize = await calculateNumTokens(promptTemplate);
-  const available = Math.max(0, contextLength - promptSize);
-  const truncatedContent =
-    available === 0 ? "" : await truncateContent(content, available);
-  return constructTextTaggingPrompt(
-    lang,
-    customPrompts,
-    truncatedContent,
-    tagStyle,
-    curatedTags,
-    potentialRelevantTags,
+  return buildBoundedPrompt(
+    preprocessContent(content),
+    contextLength,
+    (boundedContent) =>
+      constructTextTaggingPrompt(
+        lang,
+        customPrompts,
+        boundedContent,
+        tagStyle,
+        curatedTags,
+        potentialRelevantTags,
+      ),
   );
 }
 
@@ -81,11 +91,10 @@ export async function buildSummaryPrompt(
   content: string,
   contextLength: number,
 ): Promise<string> {
-  content = preprocessContent(content);
-  const promptTemplate = constructSummaryPrompt(lang, customPrompts, "");
-  const promptSize = await calculateNumTokens(promptTemplate);
-  const available = Math.max(0, contextLength - promptSize);
-  const truncatedContent =
-    available === 0 ? "" : await truncateContent(content, available);
-  return constructSummaryPrompt(lang, customPrompts, truncatedContent);
+  return buildBoundedPrompt(
+    preprocessContent(content),
+    contextLength,
+    (boundedContent) =>
+      constructSummaryPrompt(lang, customPrompts, boundedContent),
+  );
 }

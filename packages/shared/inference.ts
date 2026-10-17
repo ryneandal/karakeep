@@ -505,7 +505,7 @@ class OllamaInferenceClient implements InferenceClient {
       // https://github.com/ollama/ollama-js/issues/72
       totalTokens = NaN;
       logger.warn(
-        `Got an exception from ollama, will still attempt to deserialize the response we got so far: ${e}`,
+        "Ollama stream ended with an error; attempting to parse the partial response.",
       );
     } finally {
       if (newAbortSignal) {

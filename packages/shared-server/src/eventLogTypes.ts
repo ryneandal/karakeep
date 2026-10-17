@@ -34,6 +34,7 @@ type EventLogInternal =
       "inference.tagging.style"?: string;
       "inference.tagging.lang"?: string;
       "inference.tagging.num_generated_tags"?: number;
+      "inference.tagging.num_rejected_tags"?: number;
       "inference.tagging.num_potential_relevant_tags"?: number;
     }
   | {
