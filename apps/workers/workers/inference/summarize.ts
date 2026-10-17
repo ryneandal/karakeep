@@ -1,5 +1,4 @@
 import { and, eq } from "drizzle-orm";
-import { getBookmarkDomain } from "network";
 
 import { db } from "@karakeep/db";
 import { bookmarks, customPrompts, users } from "@karakeep/db/schema";
@@ -16,6 +15,7 @@ import { buildSummaryPrompt } from "@karakeep/shared/prompts.server";
 import { DequeuedJob } from "@karakeep/shared/queueing";
 import { BookmarkTypes } from "@karakeep/shared/types/bookmarks";
 import { Bookmark } from "@karakeep/trpc/models/bookmarks";
+import { runInferenceRequest } from "./inferenceErrors";
 
 async function fetchBookmarkDetailsForSummary(bookmarkId: string) {
   const bookmark = await db.query.bookmarks.findFirst({
@@ -79,8 +79,6 @@ export async function runSummarization(
   });
   addLogFields<"inferenceWorker.run">({
     "user.id": bookmarkData.userId,
-    "bookmark.url": bookmarkData.link?.url,
-    "bookmark.domain": getBookmarkDomain(bookmarkData.link?.url),
     "bookmark.content_type": bookmarkData.type,
     "crawler.status_code": bookmarkData.link?.crawlStatusCode ?? undefined,
     "inference.model": serverConfig.inference.textModel,
@@ -157,10 +155,14 @@ URL: ${link.url ?? ""}
     "inference.prompt.size": Buffer.byteLength(summaryPrompt, "utf8"),
   });
 
-  const summaryResult = await inferenceClient.inferFromText(summaryPrompt, {
-    schema: null, // Summaries are typically free-form text
-    abortSignal: job.abortSignal,
-  });
+  const summaryResult = await runInferenceRequest(
+    () =>
+      inferenceClient.inferFromText(summaryPrompt, {
+        schema: null, // Summaries are typically free-form text
+        abortSignal: job.abortSignal,
+      }),
+    job.abortSignal,
+  );
 
   if (!summaryResult.response) {
     throw new Error(

@@ -14,51 +14,6 @@ export class InvalidTaggingResponseError extends Error {
   }
 }
 
-export class TaggingInferenceError extends Error {
-  readonly status: number | undefined;
-  readonly code: "aborted" | "provider-http" | "provider-error";
-
-  constructor(status: number | undefined, aborted: boolean) {
-    super(
-      aborted
-        ? "Tagging inference request was canceled"
-        : status === undefined
-          ? "Tagging inference request failed"
-          : `Tagging inference request failed with HTTP ${status}`,
-    );
-    this.name = "TaggingInferenceError";
-    this.status = status;
-    this.code = aborted
-      ? "aborted"
-      : status === undefined
-        ? "provider-error"
-        : "provider-http";
-  }
-}
-
-export async function runTaggingInference<T>(
-  request: () => Promise<T>,
-  signal: AbortSignal,
-): Promise<T> {
-  try {
-    return await request();
-  } catch (error) {
-    const candidate =
-      typeof error === "object" && error !== null && "status" in error
-        ? error.status
-        : undefined;
-    const status =
-      typeof candidate === "number" &&
-      Number.isInteger(candidate) &&
-      candidate >= 100 &&
-      candidate <= 599
-        ? candidate
-        : undefined;
-    // Provider messages, bodies, headers, causes, and abort reasons may contain content.
-    throw new TaggingInferenceError(status, signal.aborted);
-  }
-}
-
 function parseJsonResponse(response: string): unknown {
   const trimmed = response.trim();
   try {

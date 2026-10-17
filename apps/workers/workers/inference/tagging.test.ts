@@ -16,10 +16,8 @@ import {
 import { BookmarkTypes } from "@karakeep/shared/types/bookmarks";
 
 import { runTagging } from "./tagging";
-import {
-  InvalidTaggingResponseError,
-  TaggingInferenceError,
-} from "./taggingOutput";
+import { InvalidTaggingResponseError } from "./taggingOutput";
+import { InferenceRequestError } from "./inferenceErrors";
 
 const effects = vi.hoisted(() => ({
   addLogFields: vi.fn(),
@@ -235,10 +233,10 @@ describe("tagging worker attachment boundary", () => {
       }),
     );
     await expect(runTagging(bookmarkId, job(), client)).rejects.toMatchObject({
-      name: "TaggingInferenceError",
+      name: "InferenceRequestError",
       status: 503,
       code: "provider-http",
-      message: "Tagging inference request failed with HTTP 503",
+      message: "Inference job failed (provider-http): HTTP 503",
     });
     expectCapturePreserved();
     expect(effects.triggerWebhook).not.toHaveBeenCalled();
@@ -247,8 +245,10 @@ describe("tagging worker attachment boundary", () => {
 
   it("forwards cancellation and preserves capture without logging the abort reason", async () => {
     const controller = new AbortController();
-    controller.abort("synthetic-private-abort-canary");
-    client.inferFromText.mockRejectedValue(controller.signal.reason);
+    client.inferFromText.mockImplementation(async () => {
+      controller.abort("synthetic-private-abort-canary");
+      throw controller.signal.reason;
+    });
     await expect(
       runTagging(bookmarkId, job(controller.signal), client),
     ).rejects.toMatchObject({ code: "aborted" });
@@ -305,7 +305,7 @@ describe("tagging worker attachment boundary", () => {
       );
       await expect(
         runTagging(bookmarkId, job(), client),
-      ).rejects.toBeInstanceOf(TaggingInferenceError);
+      ).rejects.toBeInstanceOf(InferenceRequestError);
       expect(db.select().from(bookmarkAssets).get()?.content).toBe(
         "synthetic-private-asset-canary",
       );

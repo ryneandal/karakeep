@@ -38,6 +38,12 @@ export type TracingAttributeKey =
   | "db.statement"
   | "db.operation"
   // Inference-specific attributes
+  | "inference.request.kind"
+  | "inference.request.duration"
+  | "inference.request.outcome"
+  | "inference.request.http_status"
+  | "inference.error.code"
+  | "inference.error.http_status"
   | "inference.tagging.numGeneratedTags"
   | "inference.tagging.style"
   | "inference.summary.size"

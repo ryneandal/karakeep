@@ -94,11 +94,14 @@ underscores are ignored. Commas inside a tag name are supported. Exclusions do
 not affect manual tagging or remove existing associations. If every inferred
 tag is excluded, the bookmark's current tags are left intact.
 
-The tagging worker records generated and rejected tag counts without logging
-tag names or model-response excerpts. Provider failures retain HTTP status or
-cancellation metadata without provider messages, bodies, headers or abort
-reasons. This applies to the tagging worker; other features and telemetry
-exporters have their own logging behavior.
+The inference worker records generated and rejected tag counts without logging
+tag names or model-response excerpts. Tagging and background summarization
+failures retain an error category and valid numeric HTTP status without provider
+messages, bodies, headers, causes or abort reasons. Errors are sanitized before
+job event logging and tracing, including failures before a provider request.
+Inference events retain bookmark/user identifiers, content type, configured
+model, counts and sizes; they omit source URLs and domains. Other workers and
+interactive API features have their own logging behavior.
 
 Text tagging and summary prompts are checked after assembly against
 `INFERENCE_CONTEXT_LENGTH`, using the existing `o200k_base` tokenizer. Captured
@@ -287,6 +290,25 @@ These proxy settings will be used by the crawler and other components that make 
 ## Monitoring
 
 Karakeep supports distributed tracing and structured event logging via OpenTelemetry. When enabled, traces and logs are collected for tRPC API calls, background worker operations, and other key workflows. Karakeep also exports prometheus-based metrics.
+
+The inference worker exports `karakeep_inference_requests_total` and
+`karakeep_inference_request_duration_seconds` for each text or image provider
+request. Both use `kind`, `model` and `outcome` labels. `model` is the configured
+model name (or route alias), not a model identity inferred from the response.
+Outcomes are `success`, `aborted`, `provider-http` or `provider-error`. Duration
+uses a monotonic clock and includes failed requests. These metrics do not cover
+embedding, interactive chat, or jobs skipped before a request.
+
+When event logs or tracing are enabled, request kind, configured model, duration
+in seconds, outcome and valid numeric HTTP failure status are also attached to
+the inference job. A successful request can still produce an `invalid-response`
+job failure during tagging validation. Other job error categories are
+`invalid-job` and `job-error`; provider failures use the request categories above.
+Queue retries and status transitions are unchanged. A failed summary provider
+request leaves the stored capture and any existing summary intact; a failed
+tagging provider request leaves existing tag associations intact.
+Canceled requests cannot apply a late or partial result even if the provider
+resolves successfully after cancellation.
 
 | Name                               | Required | Default  | Description                                                                                                                                                                                                                                                                                                             |
 | ---------------------------------- | -------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

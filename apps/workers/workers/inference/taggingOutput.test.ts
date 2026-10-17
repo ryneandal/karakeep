@@ -1,13 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   filterInferredTags,
   InvalidTaggingResponseError,
   parseTaggingResponse,
-  runTaggingInference,
-  TaggingInferenceError,
   tagNormalizer,
 } from "./taggingOutput";
+import { runInferenceRequest, InferenceRequestError } from "./inferenceErrors";
 
 const excluded = [
   "automation-ready",
@@ -16,11 +15,21 @@ const excluded = [
   "automation-error",
 ];
 
-describe("tagging provider error privacy", () => {
+describe("provider error privacy", () => {
+  it("does not start a request after cancellation", async () => {
+    const controller = new AbortController();
+    controller.abort("synthetic-private-abort-canary");
+    const request = vi.fn(async () => "unused");
+    await expect(
+      runInferenceRequest(request, controller.signal),
+    ).rejects.toMatchObject({ code: "aborted" });
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it("preserves a successful provider response", async () => {
     const response = { response: '{"tags":["PostgreSQL"]}', tokensUsed: 12 };
     await expect(
-      runTaggingInference(async () => response, new AbortController().signal),
+      runInferenceRequest(async () => response, new AbortController().signal),
     ).resolves.toBe(response);
   });
 
@@ -49,13 +58,13 @@ describe("tagging provider error privacy", () => {
     async ({ original, status }) => {
       let caught: unknown;
       try {
-        await runTaggingInference(async () => {
+        await runInferenceRequest(async () => {
           throw original;
         }, new AbortController().signal);
       } catch (error) {
         caught = error;
       }
-      expect(caught).toBeInstanceOf(TaggingInferenceError);
+      expect(caught).toBeInstanceOf(InferenceRequestError);
       expect(String(caught)).not.toContain("synthetic-private-provider-canary");
       expect(JSON.stringify(caught)).not.toContain(
         "synthetic-private-provider-canary",
@@ -75,15 +84,15 @@ describe("tagging provider error privacy", () => {
     controller.abort("synthetic-private-abort-canary");
     let caught: unknown;
     try {
-      await runTaggingInference(async () => {
+      await runInferenceRequest(async () => {
         throw controller.signal.reason;
       }, controller.signal);
     } catch (error) {
       caught = error;
     }
     expect(caught).toMatchObject({
-      name: "TaggingInferenceError",
-      message: "Tagging inference request was canceled",
+      name: "InferenceRequestError",
+      message: "Inference job failed (aborted)",
       code: "aborted",
     });
     expect(JSON.stringify(caught)).not.toContain(

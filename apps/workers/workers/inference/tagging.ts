@@ -1,5 +1,4 @@
 import { and, eq, inArray } from "drizzle-orm";
-import { getBookmarkDomain } from "network";
 import { buildImpersonatingTRPCClient } from "trpc";
 import { getVectorStoreClient } from "@karakeep/shared/vectorStore";
 
@@ -32,12 +31,12 @@ import { DequeuedJob, EnqueueOptions } from "@karakeep/shared/queueing";
 import { RuleEngine } from "@karakeep/trpc/lib/ruleEngine";
 import { Bookmark } from "@karakeep/trpc/models/bookmarks";
 import { WebhooksService } from "@karakeep/trpc/models/webhooks.service";
+import { runInferenceRequest } from "./inferenceErrors";
 
 import {
   filterInferredTags,
   inferredTagsSchema as openAIResponseSchema,
   parseTaggingResponse,
-  runTaggingInference,
   tagNormalizer,
 } from "./taggingOutput";
 
@@ -135,7 +134,7 @@ async function inferTagsFromImage(
     curatedTags,
     potentialRelevantTags,
   );
-  return runTaggingInference(
+  return runInferenceRequest(
     () =>
       inferenceClient.inferFromImage(prompt, metadata.contentType, base64, {
         schema: openAIResponseSchema,
@@ -229,7 +228,7 @@ async function inferTagsFromPDF(
     "inference.model": serverConfig.inference.textModel,
     "inference.prompt.size": Buffer.byteLength(prompt, "utf8"),
   });
-  return runTaggingInference(
+  return runInferenceRequest(
     () =>
       inferenceClient.inferFromText(prompt, {
         schema: openAIResponseSchema,
@@ -262,7 +261,7 @@ async function inferTagsFromText(
     "inference.model": serverConfig.inference.textModel,
     "inference.prompt.size": Buffer.byteLength(prompt, "utf8"),
   });
-  return runTaggingInference(
+  return runInferenceRequest(
     () =>
       inferenceClient.inferFromText(prompt, {
         schema: openAIResponseSchema,
@@ -289,8 +288,6 @@ async function inferTags(
   });
   addLogFields<"inferenceWorker.run">({
     "user.id": bookmark.userId,
-    "bookmark.url": bookmark.link?.url,
-    "bookmark.domain": getBookmarkDomain(bookmark.link?.url),
     "bookmark.content_type": bookmark.type,
     "crawler.status_code": bookmark.link?.crawlStatusCode ?? undefined,
     "inference.tagging.style": tagStyle,
